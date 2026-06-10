@@ -12,21 +12,21 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_RESIDENTS = [
-  { nome: 'ANDRE', telefone: '' },
-  { nome: 'KARINE', telefone: '' },
-  { nome: 'GABY', telefone: '' },
-  { nome: 'CAMILA', telefone: '' },
-  { nome: 'KAUANE', telefone: '' },
-  { nome: 'ZELIA', telefone: '' },
-  { nome: 'JHOW', telefone: '' },
-  { nome: 'VINI', telefone: '' },
+  { nome: 'ANDRE', telefone: '', apikey: '' },
+  { nome: 'KARINE', telefone: '', apikey: '' },
+  { nome: 'GABY', telefone: '', apikey: '' },
+  { nome: 'CAMILA', telefone: '', apikey: '' },
+  { nome: 'KAUANE', telefone: '', apikey: '' },
+  { nome: 'ZELIA', telefone: '', apikey: '' },
+  { nome: 'JHOW', telefone: '', apikey: '' },
+  { nome: 'VINI', telefone: '', apikey: '' },
 ];
 
 const DEFAULT_SETTINGS = {
-  webhookUrl: '',
-  token: '',
   pixKey: '',
 };
+
+const CALLMEBOT_URL = 'https://api.callmebot.com/whatsapp.php';
 
 const DEFAULT_INVOICE = {
   closed: false,
@@ -93,7 +93,7 @@ function SendStatusBanner({ status, error }) {
   if (status === 'success') {
     return (
       <div className="flex items-center gap-2 text-sm text-emerald-600 bg-emerald-50 rounded-xl px-3 py-2">
-        <CheckCircle2 size={16} /> Resumo enviado com sucesso!
+        <CheckCircle2 size={16} /> Mensagens enviadas! Confira o WhatsApp de cada morador.
       </div>
     );
   }
@@ -114,7 +114,9 @@ function SendStatusBanner({ status, error }) {
 export default function App() {
   const [residents, setResidents] = useState(() => {
     const loaded = loadFromStorage(STORAGE_KEYS.RESIDENTS, DEFAULT_RESIDENTS);
-    return loaded.map((r) => (typeof r === 'string' ? { nome: r, telefone: '' } : r));
+    return loaded.map((r) =>
+      typeof r === 'string' ? { nome: r, telefone: '', apikey: '' } : { apikey: '', ...r }
+    );
   });
   const [expenses, setExpenses] = useState(() => loadFromStorage(STORAGE_KEYS.EXPENSES, []));
   const [settings, setSettings] = useState(() => loadFromStorage(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS));
@@ -128,6 +130,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [newResident, setNewResident] = useState('');
   const [newResidentPhone, setNewResidentPhone] = useState('');
+  const [newResidentApiKey, setNewResidentApiKey] = useState('');
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.RESIDENTS, JSON.stringify(residents));
@@ -185,9 +188,13 @@ export default function App() {
   function handleAddResident() {
     const name = newResident.trim();
     if (!name || residents.some((r) => r.nome === name)) return;
-    setResidents((prev) => [...prev, { nome: name, telefone: newResidentPhone.trim() }]);
+    setResidents((prev) => [
+      ...prev,
+      { nome: name, telefone: newResidentPhone.trim(), apikey: newResidentApiKey.trim() },
+    ]);
     setNewResident('');
     setNewResidentPhone('');
+    setNewResidentApiKey('');
   }
 
   function handleRemoveResident(name) {
@@ -198,54 +205,36 @@ export default function App() {
     setResidents((prev) => prev.map((r) => (r.nome === name ? { ...r, telefone } : r)));
   }
 
+  function handleUpdateResidentApiKey(name, apikey) {
+    setResidents((prev) => prev.map((r) => (r.nome === name ? { ...r, apikey } : r)));
+  }
+
   async function sendInvoiceMessage(totalValue, perPersonValue) {
     setInvoice((prev) => ({ ...prev, sendStatus: 'sending', sendError: null }));
 
-    if (!settings.webhookUrl) {
-      setInvoice((prev) => ({
-        ...prev,
-        sendStatus: 'error',
-        sendError: 'Configure a URL do Webhook nas Configurações de API.',
-      }));
-      return;
-    }
-
-    const recipients = residents.filter((r) => r.telefone.trim());
+    const recipients = residents.filter((r) => r.telefone.trim() && r.apikey.trim());
     if (recipients.length === 0) {
       setInvoice((prev) => ({
         ...prev,
         sendStatus: 'error',
-        sendError: 'Nenhum morador com WhatsApp cadastrado.',
+        sendError: 'Nenhum morador com WhatsApp e chave do CallMeBot cadastrados.',
       }));
       return;
-    }
-
-    const headers = { 'Content-Type': 'application/json' };
-    // Diferentes provedores (Evolution API, Z-API, n8n) leem o token de formas distintas,
-    // então enviamos nos dois formatos mais comuns.
-    if (settings.token) {
-      headers['Authorization'] = `Bearer ${settings.token}`;
-      headers['apikey'] = settings.token;
     }
 
     const failed = [];
     for (const r of recipients) {
       const message = buildIndividualMessage(r.nome, totalValue, perPersonValue, settings.pixKey);
+      const url = `${CALLMEBOT_URL}?phone=${encodeURIComponent(r.telefone.trim())}&text=${encodeURIComponent(message)}&apikey=${encodeURIComponent(r.apikey.trim())}`;
       try {
-        const res = await fetch(settings.webhookUrl, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            number: r.telefone.trim(),
-            text: message,
-            message,
-          }),
-        });
-
-        if (!res.ok) throw new Error(`Erro HTTP ${res.status}`);
+        // O CallMeBot não envia cabeçalhos CORS, então usamos "no-cors":
+        // a mensagem é entregue normalmente, mas a resposta não pode ser lida.
+        await fetch(url, { mode: 'no-cors' });
       } catch {
         failed.push(r.nome);
       }
+      // Pequena pausa entre envios para não sobrecarregar o CallMeBot.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
     }
 
     if (failed.length === 0) {
@@ -507,90 +496,98 @@ export default function App() {
               <h3 className="text-sm font-semibold text-slate-600 mb-2 flex items-center gap-2">
                 <Users size={16} /> Moradores da Casa
               </h3>
+              <p className="text-xs text-slate-400 mb-2">
+                Para cada morador, cadastre o WhatsApp e a chave do{' '}
+                <a
+                  href="https://www.callmebot.com/blog/free-api-whatsapp-messages/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-indigo-600 underline"
+                >
+                  CallMeBot
+                </a>
+                .
+              </p>
               <div className="space-y-2 mb-2">
                 {residents.map((r) => (
-                  <div key={r.nome} className="flex items-center gap-2 bg-slate-50 rounded-xl p-2">
-                    <span className="text-sm font-medium text-slate-700 w-20 truncate" title={r.nome}>
-                      {r.nome}
-                    </span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={r.telefone}
-                      onChange={(e) => handleUpdateResidentPhone(r.nome, e.target.value)}
-                      placeholder="WhatsApp: 5511999999999"
-                      className="flex-1 min-w-0 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                    />
-                    <button
-                      onClick={() => handleRemoveResident(r.nome)}
-                      className="text-slate-400 hover:text-rose-500 p-1 transition-colors"
-                      aria-label={`Remover ${r.nome}`}
-                    >
-                      <X size={16} />
-                    </button>
+                  <div key={r.nome} className="bg-slate-50 rounded-xl p-2 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-slate-700">{r.nome}</span>
+                      <button
+                        onClick={() => handleRemoveResident(r.nome)}
+                        className="text-slate-400 hover:text-rose-500 p-1 transition-colors"
+                        aria-label={`Remover ${r.nome}`}
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={r.telefone}
+                        onChange={(e) => handleUpdateResidentPhone(r.nome, e.target.value)}
+                        placeholder="WhatsApp: 5511999999999"
+                        className="flex-1 min-w-0 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                      />
+                      <input
+                        type="text"
+                        value={r.apikey}
+                        onChange={(e) => handleUpdateResidentApiKey(r.nome, e.target.value)}
+                        placeholder="Chave do CallMeBot"
+                        className="flex-1 min-w-0 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                      />
+                    </div>
                   </div>
                 ))}
                 {residents.length === 0 && <p className="text-sm text-slate-400">Nenhum morador cadastrado.</p>}
               </div>
-              <div className="flex gap-2">
+              <div className="space-y-2">
                 <input
                   type="text"
                   value={newResident}
                   onChange={(e) => setNewResident(e.target.value)}
                   placeholder="Nome do morador"
-                  className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 />
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={newResidentPhone}
-                  onChange={(e) => setNewResidentPhone(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      handleAddResident();
-                    }
-                  }}
-                  placeholder="WhatsApp: 5511999999999"
-                  className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                />
-                <button
-                  onClick={handleAddResident}
-                  className="bg-indigo-600 text-white rounded-xl px-3 hover:bg-indigo-700 transition-colors"
-                  aria-label="Adicionar morador"
-                >
-                  <Plus size={18} />
-                </button>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={newResidentPhone}
+                    onChange={(e) => setNewResidentPhone(e.target.value)}
+                    placeholder="WhatsApp: 5511999999999"
+                    className="flex-1 min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  />
+                  <input
+                    type="text"
+                    value={newResidentApiKey}
+                    onChange={(e) => setNewResidentApiKey(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddResident();
+                      }
+                    }}
+                    placeholder="Chave do CallMeBot"
+                    className="flex-1 min-w-0 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  />
+                  <button
+                    onClick={handleAddResident}
+                    className="bg-indigo-600 text-white rounded-xl px-3 hover:bg-indigo-700 transition-colors"
+                    aria-label="Adicionar morador"
+                  >
+                    <Plus size={18} />
+                  </button>
+                </div>
               </div>
             </div>
 
-            {/* API do WhatsApp */}
+            {/* Pix */}
             <div className="space-y-3 border-t border-slate-100 pt-4">
               <h3 className="text-sm font-semibold text-slate-600 flex items-center gap-2">
-                <Send size={16} /> API do WhatsApp
+                <Send size={16} /> Pagamento
               </h3>
-
-              <div>
-                <label className="text-xs font-medium text-slate-500">URL do Webhook/Endpoint</label>
-                <input
-                  type="text"
-                  value={settings.webhookUrl}
-                  onChange={(e) => setSettings((s) => ({ ...s, webhookUrl: e.target.value }))}
-                  placeholder="https://sua-api.com/webhook/enviar-mensagem"
-                  className={inputClass}
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-medium text-slate-500">Token de Autenticação</label>
-                <input
-                  type="password"
-                  value={settings.token}
-                  onChange={(e) => setSettings((s) => ({ ...s, token: e.target.value }))}
-                  placeholder="Bearer token / API Key"
-                  className={inputClass}
-                />
-              </div>
 
               <div>
                 <label className="text-xs font-medium text-slate-500">Chave Pix (para o resumo)</label>
