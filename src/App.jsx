@@ -1,0 +1,575 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Plus, Trash2, Settings,
+  X, Send, CheckCircle2, AlertCircle, Loader2, Wallet, Users, Lock, RotateCcw, Receipt,
+} from 'lucide-react';
+
+const STORAGE_KEYS = {
+  RESIDENTS: 'cartaoCasa_residents',
+  EXPENSES: 'cartaoCasa_expenses',
+  SETTINGS: 'cartaoCasa_settings',
+  INVOICE: 'cartaoCasa_invoice',
+};
+
+const DEFAULT_RESIDENTS = ['ANDRE', 'KARINE', 'GABY', 'CAMILA', 'KAUANE', 'ZELIA', 'JHOW', 'VINI'];
+
+const DEFAULT_SETTINGS = {
+  webhookUrl: '',
+  token: '',
+  groupId: '',
+  pixKey: '',
+};
+
+const DEFAULT_INVOICE = {
+  closed: false,
+  closedAt: null,
+  total: 0,
+  perPerson: 0,
+  sendStatus: 'idle', // idle | sending | success | error
+  sendError: null,
+};
+
+const inputClass =
+  'w-full mt-1 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:bg-slate-50 disabled:text-slate-400';
+
+function loadFromStorage(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function formatBRL(value) {
+  return (Number(value) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+function formatDate(iso) {
+  const d = new Date(iso);
+  return `${d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function formatDateTime(iso) {
+  return new Date(iso).toLocaleString('pt-BR');
+}
+
+function getCurrentMonthLabel() {
+  const str = new Date().toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function buildWhatsAppMessage(total, perPerson, residents, pixKey) {
+  const lines = [
+    '🚨 *FECHAMENTO DA FATURA* 🚨',
+    `*Total do Cartão:* ${formatBRL(total)}`,
+    '---------------------------------',
+    '*Divisão por pessoa:*',
+    ...residents.map((r) => `- ${r}: ${formatBRL(perPerson)}`),
+    '---------------------------------',
+  ];
+  lines.push(
+    pixKey
+      ? `Por favor, realizem o pix para *${pixKey}*.`
+      : 'Por favor, realizem o pagamento da sua parte.'
+  );
+  return lines.join('\n');
+}
+
+function SendStatusBanner({ status, error }) {
+  if (status === 'sending') {
+    return (
+      <div className="flex items-center gap-2 text-sm text-indigo-600 bg-indigo-50 rounded-xl px-3 py-2">
+        <Loader2 size={16} className="animate-spin" /> Enviando para o WhatsApp...
+      </div>
+    );
+  }
+  if (status === 'success') {
+    return (
+      <div className="flex items-center gap-2 text-sm text-emerald-600 bg-emerald-50 rounded-xl px-3 py-2">
+        <CheckCircle2 size={16} /> Resumo enviado com sucesso!
+      </div>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <div className="flex items-start gap-2 text-sm text-rose-600 bg-rose-50 rounded-xl px-3 py-2">
+        <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
+        <div>
+          <p className="font-medium">Erro ao enviar</p>
+          {error && <p className="text-xs text-rose-500 mt-0.5">{error}</p>}
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
+
+export default function App() {
+  const [residents, setResidents] = useState(() => loadFromStorage(STORAGE_KEYS.RESIDENTS, DEFAULT_RESIDENTS));
+  const [expenses, setExpenses] = useState(() => loadFromStorage(STORAGE_KEYS.EXPENSES, []));
+  const [settings, setSettings] = useState(() => loadFromStorage(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS));
+  const [invoice, setInvoice] = useState(() => loadFromStorage(STORAGE_KEYS.INVOICE, DEFAULT_INVOICE));
+
+  const [form, setForm] = useState({
+    comprador: residents[0] || '',
+    valor: '',
+    descricao: '',
+  });
+  const [showSettings, setShowSettings] = useState(false);
+  const [newResident, setNewResident] = useState('');
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.RESIDENTS, JSON.stringify(residents));
+  }, [residents]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
+  }, [expenses]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.INVOICE, JSON.stringify(invoice));
+  }, [invoice]);
+
+  useEffect(() => {
+    if (residents.length > 0 && !residents.includes(form.comprador)) {
+      setForm((f) => ({ ...f, comprador: residents[0] }));
+    }
+  }, [residents]);
+
+  const total = useMemo(() => expenses.reduce((sum, e) => sum + e.valor, 0), [expenses]);
+
+  const totalsByPerson = useMemo(() => {
+    const map = {};
+    residents.forEach((r) => (map[r] = 0));
+    expenses.forEach((e) => {
+      map[e.comprador] = (map[e.comprador] || 0) + e.valor;
+    });
+    return map;
+  }, [expenses, residents]);
+
+  const valorNumerico = parseFloat((form.valor || '').replace(',', '.'));
+  const isFormValid =
+    !invoice.closed && form.comprador && form.descricao.trim().length > 0 && valorNumerico > 0;
+
+  function handleAddExpense(e) {
+    e.preventDefault();
+    if (!isFormValid) return;
+    const newExpense = {
+      id: crypto.randomUUID(),
+      comprador: form.comprador,
+      valor: valorNumerico,
+      descricao: form.descricao.trim(),
+      data: new Date().toISOString(),
+    };
+    setExpenses((prev) => [newExpense, ...prev]);
+    setForm((f) => ({ ...f, valor: '', descricao: '' }));
+  }
+
+  function handleDeleteExpense(id) {
+    setExpenses((prev) => prev.filter((e) => e.id !== id));
+  }
+
+  function handleAddResident() {
+    const name = newResident.trim();
+    if (!name || residents.includes(name)) return;
+    setResidents((prev) => [...prev, name]);
+    setNewResident('');
+  }
+
+  function handleRemoveResident(name) {
+    setResidents((prev) => prev.filter((r) => r !== name));
+  }
+
+  async function sendInvoiceMessage(totalValue, perPersonValue) {
+    setInvoice((prev) => ({ ...prev, sendStatus: 'sending', sendError: null }));
+    const message = buildWhatsAppMessage(totalValue, perPersonValue, residents, settings.pixKey);
+
+    try {
+      if (!settings.webhookUrl) {
+        throw new Error('Configure a URL do Webhook nas Configurações de API.');
+      }
+
+      const headers = { 'Content-Type': 'application/json' };
+      // Diferentes provedores (Evolution API, Z-API, n8n) leem o token de formas distintas,
+      // então enviamos nos dois formatos mais comuns.
+      if (settings.token) {
+        headers['Authorization'] = `Bearer ${settings.token}`;
+        headers['apikey'] = settings.token;
+      }
+
+      const res = await fetch(settings.webhookUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          number: settings.groupId || undefined,
+          text: message,
+          message,
+        }),
+      });
+
+      if (!res.ok) throw new Error(`Erro HTTP ${res.status}`);
+
+      setInvoice((prev) => ({ ...prev, sendStatus: 'success' }));
+    } catch (err) {
+      setInvoice((prev) => ({ ...prev, sendStatus: 'error', sendError: err.message }));
+    }
+  }
+
+  async function handleCloseInvoice() {
+    if (expenses.length === 0 || residents.length === 0) return;
+    if (!window.confirm('Fechar a fatura e enviar o resumo para o grupo do WhatsApp?')) return;
+
+    const totalValue = total;
+    const perPersonValue = totalValue / residents.length;
+
+    setInvoice({
+      closed: true,
+      closedAt: new Date().toISOString(),
+      total: totalValue,
+      perPerson: perPersonValue,
+      sendStatus: 'idle',
+      sendError: null,
+    });
+
+    await sendInvoiceMessage(totalValue, perPersonValue);
+  }
+
+  function handleRetrySend() {
+    sendInvoiceMessage(invoice.total, invoice.perPerson);
+  }
+
+  function handleNewInvoice() {
+    if (!window.confirm('Iniciar uma nova fatura? Os lançamentos atuais serão apagados.')) return;
+    setExpenses([]);
+    setInvoice(DEFAULT_INVOICE);
+  }
+
+  const canClose = !invoice.closed && expenses.length > 0 && residents.length > 0;
+
+  return (
+    <div className="min-h-screen bg-slate-50 pb-10">
+      <header className="sticky top-0 z-10 bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className="bg-indigo-600 text-white p-2 rounded-xl">
+            <Wallet size={20} />
+          </div>
+          <div>
+            <h1 className="font-bold text-slate-800 text-lg leading-tight">Cartão da Casa</h1>
+            <p className="text-xs text-slate-400">{getCurrentMonthLabel()}</p>
+          </div>
+        </div>
+        <button
+          onClick={() => setShowSettings(true)}
+          className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors"
+          aria-label="Configurações"
+        >
+          <Settings size={22} />
+        </button>
+      </header>
+
+      <main className="max-w-2xl mx-auto px-4 py-4 space-y-4">
+        {/* Resumo Financeiro */}
+        <section className="bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-2xl p-5 shadow-lg">
+          <p className="text-indigo-100 text-sm">Total da Fatura</p>
+          <p className="text-3xl font-bold mt-1">{formatBRL(total)}</p>
+          <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {residents.map((r) => (
+              <div key={r} className="bg-white/10 rounded-lg px-3 py-2">
+                <p className="text-xs text-indigo-100 truncate">{r}</p>
+                <p className="font-semibold">{formatBRL(totalsByPerson[r] || 0)}</p>
+              </div>
+            ))}
+            {residents.length === 0 && (
+              <p className="col-span-2 sm:col-span-3 text-sm text-indigo-100">
+                Nenhum morador cadastrado. Adicione em Configurações.
+              </p>
+            )}
+          </div>
+        </section>
+
+        {/* Fatura Fechada */}
+        {invoice.closed && (
+          <section className="bg-white rounded-2xl shadow-sm border border-slate-100 p-4 space-y-3">
+            <div className="flex items-center gap-2 text-emerald-600 font-semibold">
+              <Lock size={18} /> Fatura Fechada
+            </div>
+            <p className="text-sm text-slate-500">Fechada em {formatDateTime(invoice.closedAt)}</p>
+
+            <div className="bg-slate-50 rounded-xl p-3 space-y-1">
+              <p className="text-sm text-slate-500">
+                Total: <span className="font-bold text-slate-800">{formatBRL(invoice.total)}</span>
+              </p>
+              <p className="text-sm text-slate-500">
+                Cada um paga:{' '}
+                <span className="font-bold text-slate-800">{formatBRL(invoice.perPerson)}</span>
+              </p>
+            </div>
+
+            <SendStatusBanner status={invoice.sendStatus} error={invoice.sendError} />
+
+            {invoice.sendStatus === 'error' && (
+              <button
+                onClick={handleRetrySend}
+                className="w-full bg-indigo-600 text-white rounded-xl py-2.5 font-semibold flex items-center justify-center gap-2 hover:bg-indigo-700 transition-colors"
+              >
+                <Send size={16} /> Tentar Enviar Novamente
+              </button>
+            )}
+
+            <button
+              onClick={handleNewInvoice}
+              className="w-full border border-slate-200 text-slate-600 rounded-xl py-2.5 font-semibold flex items-center justify-center gap-2 hover:bg-slate-50 transition-colors"
+            >
+              <RotateCcw size={16} /> Iniciar Nova Fatura
+            </button>
+          </section>
+        )}
+
+        {/* Painel de Lançamento */}
+        <form
+          onSubmit={handleAddExpense}
+          className={`bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-3 ${invoice.closed ? 'opacity-60' : ''}`}
+        >
+          <h2 className="font-semibold text-slate-700 flex items-center gap-2">
+            <Plus size={18} /> Novo Lançamento
+          </h2>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2 sm:col-span-1">
+              <label className="text-xs font-medium text-slate-500">Comprador</label>
+              <select
+                value={form.comprador}
+                onChange={(e) => setForm((f) => ({ ...f, comprador: e.target.value }))}
+                disabled={invoice.closed || residents.length === 0}
+                className={inputClass}
+              >
+                {residents.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="col-span-2 sm:col-span-1">
+              <label className="text-xs font-medium text-slate-500">Valor (R$)</label>
+              <input
+                type="text"
+                inputMode="decimal"
+                placeholder="0,00"
+                value={form.valor}
+                onChange={(e) => setForm((f) => ({ ...f, valor: e.target.value }))}
+                disabled={invoice.closed}
+                className={inputClass}
+              />
+            </div>
+
+            <div className="col-span-2">
+              <label className="text-xs font-medium text-slate-500">Descrição</label>
+              <input
+                type="text"
+                placeholder="Ex: Compras da semana"
+                value={form.descricao}
+                onChange={(e) => setForm((f) => ({ ...f, descricao: e.target.value }))}
+                disabled={invoice.closed}
+                className={inputClass}
+              />
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={!isFormValid}
+            className="w-full bg-indigo-600 text-white rounded-xl py-3 font-semibold flex items-center justify-center gap-2 hover:bg-indigo-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Plus size={18} /> Adicionar Gasto
+          </button>
+        </form>
+
+        {/* Lista de Lançamentos */}
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="font-semibold text-slate-700 flex items-center gap-2">
+              <Receipt size={18} /> Lançamentos do Mês
+            </h2>
+            <span className="text-xs text-slate-400">{expenses.length} itens</span>
+          </div>
+
+          {expenses.length === 0 ? (
+            <p className="text-center text-sm text-slate-400 py-8 px-4">Nenhum gasto lançado ainda.</p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {expenses.map((exp) => {
+                return (
+                  <li key={exp.id} className="flex items-center gap-3 px-4 py-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-slate-700 text-sm truncate">{exp.descricao}</p>
+                      <p className="text-xs text-slate-400">
+                        {exp.comprador} · {formatDate(exp.data)}
+                      </p>
+                    </div>
+                    <p className="font-semibold text-slate-700 text-sm whitespace-nowrap">{formatBRL(exp.valor)}</p>
+                    {!invoice.closed && (
+                      <button
+                        onClick={() => handleDeleteExpense(exp.id)}
+                        className="text-slate-300 hover:text-rose-500 p-1 transition-colors"
+                        aria-label="Excluir lançamento"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        {/* Botão de Fechamento */}
+        {!invoice.closed && (
+          <button
+            onClick={handleCloseInvoice}
+            disabled={!canClose}
+            className="w-full bg-rose-600 text-white rounded-2xl py-4 font-bold text-base flex items-center justify-center gap-2 shadow-lg shadow-rose-200 hover:bg-rose-700 transition-colors disabled:opacity-40 disabled:shadow-none disabled:cursor-not-allowed"
+          >
+            <Lock size={18} /> Fechar Fatura e Enviar Resumo
+          </button>
+        )}
+      </main>
+
+      {/* Modal de Configurações */}
+      {showSettings && (
+        <div
+          className="fixed inset-0 bg-black/40 z-20 flex items-end sm:items-center justify-center"
+          onClick={() => setShowSettings(false)}
+        >
+          <div
+            className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[90vh] overflow-y-auto p-5 space-y-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="font-bold text-lg text-slate-800">Configurações</h2>
+              <button
+                onClick={() => setShowSettings(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 transition-colors"
+                aria-label="Fechar"
+              >
+                <X size={22} />
+              </button>
+            </div>
+
+            {/* Moradores */}
+            <div>
+              <h3 className="text-sm font-semibold text-slate-600 mb-2 flex items-center gap-2">
+                <Users size={16} /> Moradores da Casa
+              </h3>
+              <div className="flex flex-wrap gap-2 mb-2">
+                {residents.map((r) => (
+                  <span
+                    key={r}
+                    className="bg-slate-100 text-slate-700 text-sm rounded-full pl-3 pr-1.5 py-1 flex items-center gap-1"
+                  >
+                    {r}
+                    <button
+                      onClick={() => handleRemoveResident(r)}
+                      className="text-slate-400 hover:text-rose-500 rounded-full p-0.5 transition-colors"
+                      aria-label={`Remover ${r}`}
+                    >
+                      <X size={14} />
+                    </button>
+                  </span>
+                ))}
+                {residents.length === 0 && <p className="text-sm text-slate-400">Nenhum morador cadastrado.</p>}
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newResident}
+                  onChange={(e) => setNewResident(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddResident();
+                    }
+                  }}
+                  placeholder="Nome do morador"
+                  className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                />
+                <button
+                  onClick={handleAddResident}
+                  className="bg-indigo-600 text-white rounded-xl px-3 hover:bg-indigo-700 transition-colors"
+                  aria-label="Adicionar morador"
+                >
+                  <Plus size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* API do WhatsApp */}
+            <div className="space-y-3 border-t border-slate-100 pt-4">
+              <h3 className="text-sm font-semibold text-slate-600 flex items-center gap-2">
+                <Send size={16} /> API do WhatsApp
+              </h3>
+
+              <div>
+                <label className="text-xs font-medium text-slate-500">URL do Webhook/Endpoint</label>
+                <input
+                  type="text"
+                  value={settings.webhookUrl}
+                  onChange={(e) => setSettings((s) => ({ ...s, webhookUrl: e.target.value }))}
+                  placeholder="https://sua-api.com/webhook/enviar-mensagem"
+                  className={inputClass}
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-slate-500">Token de Autenticação</label>
+                <input
+                  type="password"
+                  value={settings.token}
+                  onChange={(e) => setSettings((s) => ({ ...s, token: e.target.value }))}
+                  placeholder="Bearer token / API Key"
+                  className={inputClass}
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-slate-500">Número/ID do Grupo (opcional)</label>
+                <input
+                  type="text"
+                  value={settings.groupId}
+                  onChange={(e) => setSettings((s) => ({ ...s, groupId: e.target.value }))}
+                  placeholder="Ex: 5511999999999-1234567890@g.us"
+                  className={inputClass}
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-slate-500">Chave Pix (para o resumo)</label>
+                <input
+                  type="text"
+                  value={settings.pixKey}
+                  onChange={(e) => setSettings((s) => ({ ...s, pixKey: e.target.value }))}
+                  placeholder="Ex: email@exemplo.com"
+                  className={inputClass}
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowSettings(false)}
+              className="w-full bg-indigo-600 text-white rounded-xl py-3 font-semibold hover:bg-indigo-700 transition-colors"
+            >
+              Salvar e Fechar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
