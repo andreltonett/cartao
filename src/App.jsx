@@ -11,12 +11,20 @@ const STORAGE_KEYS = {
   INVOICE: 'cartaoCasa_invoice',
 };
 
-const DEFAULT_RESIDENTS = ['ANDRE', 'KARINE', 'GABY', 'CAMILA', 'KAUANE', 'ZELIA', 'JHOW', 'VINI'];
+const DEFAULT_RESIDENTS = [
+  { nome: 'ANDRE', telefone: '' },
+  { nome: 'KARINE', telefone: '' },
+  { nome: 'GABY', telefone: '' },
+  { nome: 'CAMILA', telefone: '' },
+  { nome: 'KAUANE', telefone: '' },
+  { nome: 'ZELIA', telefone: '' },
+  { nome: 'JHOW', telefone: '' },
+  { nome: 'VINI', telefone: '' },
+];
 
 const DEFAULT_SETTINGS = {
   webhookUrl: '',
   token: '',
-  groupId: '',
   pixKey: '',
 };
 
@@ -59,19 +67,17 @@ function getCurrentMonthLabel() {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
-function buildWhatsAppMessage(total, perPerson, residents, pixKey) {
+function buildIndividualMessage(nome, total, perPerson, pixKey) {
   const lines = [
-    '🚨 *FECHAMENTO DA FATURA* 🚨',
-    `*Total do Cartão:* ${formatBRL(total)}`,
-    '---------------------------------',
-    '*Divisão por pessoa:*',
-    ...residents.map((r) => `- ${r}: ${formatBRL(perPerson)}`),
-    '---------------------------------',
+    `Olá, *${nome}*! 🚨`,
+    '*Fechamento da fatura do Cartão da Casa*',
+    `Total do Cartão: ${formatBRL(total)}`,
+    `Sua parte: *${formatBRL(perPerson)}*`,
   ];
   lines.push(
     pixKey
-      ? `Por favor, realizem o pix para *${pixKey}*.`
-      : 'Por favor, realizem o pagamento da sua parte.'
+      ? `Por favor, realize o pix para *${pixKey}*.`
+      : 'Por favor, realize o pagamento da sua parte.'
   );
   return lines.join('\n');
 }
@@ -106,18 +112,22 @@ function SendStatusBanner({ status, error }) {
 }
 
 export default function App() {
-  const [residents, setResidents] = useState(() => loadFromStorage(STORAGE_KEYS.RESIDENTS, DEFAULT_RESIDENTS));
+  const [residents, setResidents] = useState(() => {
+    const loaded = loadFromStorage(STORAGE_KEYS.RESIDENTS, DEFAULT_RESIDENTS);
+    return loaded.map((r) => (typeof r === 'string' ? { nome: r, telefone: '' } : r));
+  });
   const [expenses, setExpenses] = useState(() => loadFromStorage(STORAGE_KEYS.EXPENSES, []));
   const [settings, setSettings] = useState(() => loadFromStorage(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS));
   const [invoice, setInvoice] = useState(() => loadFromStorage(STORAGE_KEYS.INVOICE, DEFAULT_INVOICE));
 
   const [form, setForm] = useState({
-    comprador: residents[0] || '',
+    comprador: residents[0]?.nome || '',
     valor: '',
     descricao: '',
   });
   const [showSettings, setShowSettings] = useState(false);
   const [newResident, setNewResident] = useState('');
+  const [newResidentPhone, setNewResidentPhone] = useState('');
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.RESIDENTS, JSON.stringify(residents));
@@ -135,17 +145,15 @@ export default function App() {
     localStorage.setItem(STORAGE_KEYS.INVOICE, JSON.stringify(invoice));
   }, [invoice]);
 
-  useEffect(() => {
-    if (residents.length > 0 && !residents.includes(form.comprador)) {
-      setForm((f) => ({ ...f, comprador: residents[0] }));
-    }
-  }, [residents]);
+  const compradorAtual = residents.some((r) => r.nome === form.comprador)
+    ? form.comprador
+    : residents[0]?.nome || '';
 
   const total = useMemo(() => expenses.reduce((sum, e) => sum + e.valor, 0), [expenses]);
 
   const totalsByPerson = useMemo(() => {
     const map = {};
-    residents.forEach((r) => (map[r] = 0));
+    residents.forEach((r) => (map[r.nome] = 0));
     expenses.forEach((e) => {
       map[e.comprador] = (map[e.comprador] || 0) + e.valor;
     });
@@ -154,14 +162,14 @@ export default function App() {
 
   const valorNumerico = parseFloat((form.valor || '').replace(',', '.'));
   const isFormValid =
-    !invoice.closed && form.comprador && form.descricao.trim().length > 0 && valorNumerico > 0;
+    !invoice.closed && compradorAtual && form.descricao.trim().length > 0 && valorNumerico > 0;
 
   function handleAddExpense(e) {
     e.preventDefault();
     if (!isFormValid) return;
     const newExpense = {
       id: crypto.randomUUID(),
-      comprador: form.comprador,
+      comprador: compradorAtual,
       valor: valorNumerico,
       descricao: form.descricao.trim(),
       data: new Date().toISOString(),
@@ -176,53 +184,84 @@ export default function App() {
 
   function handleAddResident() {
     const name = newResident.trim();
-    if (!name || residents.includes(name)) return;
-    setResidents((prev) => [...prev, name]);
+    if (!name || residents.some((r) => r.nome === name)) return;
+    setResidents((prev) => [...prev, { nome: name, telefone: newResidentPhone.trim() }]);
     setNewResident('');
+    setNewResidentPhone('');
   }
 
   function handleRemoveResident(name) {
-    setResidents((prev) => prev.filter((r) => r !== name));
+    setResidents((prev) => prev.filter((r) => r.nome !== name));
+  }
+
+  function handleUpdateResidentPhone(name, telefone) {
+    setResidents((prev) => prev.map((r) => (r.nome === name ? { ...r, telefone } : r)));
   }
 
   async function sendInvoiceMessage(totalValue, perPersonValue) {
     setInvoice((prev) => ({ ...prev, sendStatus: 'sending', sendError: null }));
-    const message = buildWhatsAppMessage(totalValue, perPersonValue, residents, settings.pixKey);
 
-    try {
-      if (!settings.webhookUrl) {
-        throw new Error('Configure a URL do Webhook nas Configurações de API.');
+    if (!settings.webhookUrl) {
+      setInvoice((prev) => ({
+        ...prev,
+        sendStatus: 'error',
+        sendError: 'Configure a URL do Webhook nas Configurações de API.',
+      }));
+      return;
+    }
+
+    const recipients = residents.filter((r) => r.telefone.trim());
+    if (recipients.length === 0) {
+      setInvoice((prev) => ({
+        ...prev,
+        sendStatus: 'error',
+        sendError: 'Nenhum morador com WhatsApp cadastrado.',
+      }));
+      return;
+    }
+
+    const headers = { 'Content-Type': 'application/json' };
+    // Diferentes provedores (Evolution API, Z-API, n8n) leem o token de formas distintas,
+    // então enviamos nos dois formatos mais comuns.
+    if (settings.token) {
+      headers['Authorization'] = `Bearer ${settings.token}`;
+      headers['apikey'] = settings.token;
+    }
+
+    const failed = [];
+    for (const r of recipients) {
+      const message = buildIndividualMessage(r.nome, totalValue, perPersonValue, settings.pixKey);
+      try {
+        const res = await fetch(settings.webhookUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            number: r.telefone.trim(),
+            text: message,
+            message,
+          }),
+        });
+
+        if (!res.ok) throw new Error(`Erro HTTP ${res.status}`);
+      } catch {
+        failed.push(r.nome);
       }
+    }
 
-      const headers = { 'Content-Type': 'application/json' };
-      // Diferentes provedores (Evolution API, Z-API, n8n) leem o token de formas distintas,
-      // então enviamos nos dois formatos mais comuns.
-      if (settings.token) {
-        headers['Authorization'] = `Bearer ${settings.token}`;
-        headers['apikey'] = settings.token;
-      }
-
-      const res = await fetch(settings.webhookUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          number: settings.groupId || undefined,
-          text: message,
-          message,
-        }),
-      });
-
-      if (!res.ok) throw new Error(`Erro HTTP ${res.status}`);
-
+    if (failed.length === 0) {
       setInvoice((prev) => ({ ...prev, sendStatus: 'success' }));
-    } catch (err) {
-      setInvoice((prev) => ({ ...prev, sendStatus: 'error', sendError: err.message }));
+    } else {
+      setInvoice((prev) => ({
+        ...prev,
+        sendStatus: 'error',
+        sendError: `Falha ao enviar para: ${failed.join(', ')}`,
+      }));
     }
   }
 
   async function handleCloseInvoice() {
     if (expenses.length === 0 || residents.length === 0) return;
-    if (!window.confirm('Fechar a fatura e enviar o resumo para o grupo do WhatsApp?')) return;
+    if (!window.confirm('Fechar a fatura e enviar a cobrança individual para cada morador no WhatsApp?')) return;
 
     const totalValue = total;
     const perPersonValue = totalValue / residents.length;
@@ -279,9 +318,9 @@ export default function App() {
           <p className="text-3xl font-bold mt-1">{formatBRL(total)}</p>
           <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 gap-2">
             {residents.map((r) => (
-              <div key={r} className="bg-white/10 rounded-lg px-3 py-2">
-                <p className="text-xs text-indigo-100 truncate">{r}</p>
-                <p className="font-semibold">{formatBRL(totalsByPerson[r] || 0)}</p>
+              <div key={r.nome} className="bg-white/10 rounded-lg px-3 py-2">
+                <p className="text-xs text-indigo-100 truncate">{r.nome}</p>
+                <p className="font-semibold">{formatBRL(totalsByPerson[r.nome] || 0)}</p>
               </div>
             ))}
             {residents.length === 0 && (
@@ -343,14 +382,14 @@ export default function App() {
             <div className="col-span-2 sm:col-span-1">
               <label className="text-xs font-medium text-slate-500">Comprador</label>
               <select
-                value={form.comprador}
+                value={compradorAtual}
                 onChange={(e) => setForm((f) => ({ ...f, comprador: e.target.value }))}
                 disabled={invoice.closed || residents.length === 0}
                 className={inputClass}
               >
                 {residents.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
+                  <option key={r.nome} value={r.nome}>
+                    {r.nome}
                   </option>
                 ))}
               </select>
@@ -468,21 +507,28 @@ export default function App() {
               <h3 className="text-sm font-semibold text-slate-600 mb-2 flex items-center gap-2">
                 <Users size={16} /> Moradores da Casa
               </h3>
-              <div className="flex flex-wrap gap-2 mb-2">
+              <div className="space-y-2 mb-2">
                 {residents.map((r) => (
-                  <span
-                    key={r}
-                    className="bg-slate-100 text-slate-700 text-sm rounded-full pl-3 pr-1.5 py-1 flex items-center gap-1"
-                  >
-                    {r}
+                  <div key={r.nome} className="flex items-center gap-2 bg-slate-50 rounded-xl p-2">
+                    <span className="text-sm font-medium text-slate-700 w-20 truncate" title={r.nome}>
+                      {r.nome}
+                    </span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={r.telefone}
+                      onChange={(e) => handleUpdateResidentPhone(r.nome, e.target.value)}
+                      placeholder="WhatsApp: 5511999999999"
+                      className="flex-1 min-w-0 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                    />
                     <button
-                      onClick={() => handleRemoveResident(r)}
-                      className="text-slate-400 hover:text-rose-500 rounded-full p-0.5 transition-colors"
-                      aria-label={`Remover ${r}`}
+                      onClick={() => handleRemoveResident(r.nome)}
+                      className="text-slate-400 hover:text-rose-500 p-1 transition-colors"
+                      aria-label={`Remover ${r.nome}`}
                     >
-                      <X size={14} />
+                      <X size={16} />
                     </button>
-                  </span>
+                  </div>
                 ))}
                 {residents.length === 0 && <p className="text-sm text-slate-400">Nenhum morador cadastrado.</p>}
               </div>
@@ -491,13 +537,21 @@ export default function App() {
                   type="text"
                   value={newResident}
                   onChange={(e) => setNewResident(e.target.value)}
+                  placeholder="Nome do morador"
+                  className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={newResidentPhone}
+                  onChange={(e) => setNewResidentPhone(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
                       handleAddResident();
                     }
                   }}
-                  placeholder="Nome do morador"
+                  placeholder="WhatsApp: 5511999999999"
                   className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 />
                 <button
@@ -534,17 +588,6 @@ export default function App() {
                   value={settings.token}
                   onChange={(e) => setSettings((s) => ({ ...s, token: e.target.value }))}
                   placeholder="Bearer token / API Key"
-                  className={inputClass}
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-medium text-slate-500">Número/ID do Grupo (opcional)</label>
-                <input
-                  type="text"
-                  value={settings.groupId}
-                  onChange={(e) => setSettings((s) => ({ ...s, groupId: e.target.value }))}
-                  placeholder="Ex: 5511999999999-1234567890@g.us"
                   className={inputClass}
                 />
               </div>
