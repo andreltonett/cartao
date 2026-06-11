@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Trash2, Settings,
-  X, Send, CheckCircle2, AlertCircle, Loader2, Wallet, Users, Lock, RotateCcw, Receipt,
+  X, Send, CheckCircle2, AlertCircle, Loader2, Wallet, Users, Lock, RotateCcw, Receipt, History,
 } from 'lucide-react';
+import HistoricoView from './HistoricoView.jsx';
 
 const STORAGE_KEYS = {
   RESIDENTS: 'cartaoCasa_residents',
   EXPENSES: 'cartaoCasa_expenses',
   SETTINGS: 'cartaoCasa_settings',
   INVOICE: 'cartaoCasa_invoice',
+  MESSAGES: 'cartaoCasa_messages',
 };
 
 const DEFAULT_RESIDENTS = [
@@ -121,6 +123,7 @@ export default function App() {
   const [expenses, setExpenses] = useState(() => loadFromStorage(STORAGE_KEYS.EXPENSES, []));
   const [settings, setSettings] = useState(() => loadFromStorage(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS));
   const [invoice, setInvoice] = useState(() => loadFromStorage(STORAGE_KEYS.INVOICE, DEFAULT_INVOICE));
+  const [messages, setMessages] = useState(() => loadFromStorage(STORAGE_KEYS.MESSAGES, []));
 
   const [form, setForm] = useState({
     comprador: residents[0]?.nome || '',
@@ -128,6 +131,7 @@ export default function App() {
     descricao: '',
   });
   const [showSettings, setShowSettings] = useState(false);
+  const [view, setView] = useState('dashboard'); // dashboard | historico
   const [newResident, setNewResident] = useState('');
   const [newResidentPhone, setNewResidentPhone] = useState('');
   const [newResidentApiKey, setNewResidentApiKey] = useState('');
@@ -147,6 +151,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.INVOICE, JSON.stringify(invoice));
   }, [invoice]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.MESSAGES, JSON.stringify(messages));
+  }, [messages]);
 
   const compradorAtual = residents.some((r) => r.nome === form.comprador)
     ? form.comprador
@@ -209,6 +217,29 @@ export default function App() {
     setResidents((prev) => prev.map((r) => (r.nome === name ? { ...r, apikey } : r)));
   }
 
+  async function sendCallMeBotMessage(resident, text) {
+    const url = `${CALLMEBOT_URL}?phone=${encodeURIComponent(resident.telefone.trim())}&text=${encodeURIComponent(text)}&apikey=${encodeURIComponent(resident.apikey.trim())}`;
+    let status = 'enviado';
+    try {
+      // O CallMeBot não envia cabeçalhos CORS, então usamos "no-cors":
+      // a mensagem é entregue normalmente, mas a resposta não pode ser lida.
+      await fetch(url, { mode: 'no-cors' });
+    } catch {
+      status = 'erro';
+    }
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), residente: resident.nome, texto: text, data: new Date().toISOString(), status },
+    ]);
+    return status;
+  }
+
+  async function sendAdHocMessage(residentName, text) {
+    const resident = residents.find((r) => r.nome === residentName);
+    if (!resident || !resident.telefone.trim() || !resident.apikey.trim()) return 'erro';
+    return sendCallMeBotMessage(resident, text);
+  }
+
   async function sendInvoiceMessage(totalValue, perPersonValue) {
     setInvoice((prev) => ({ ...prev, sendStatus: 'sending', sendError: null }));
 
@@ -225,14 +256,8 @@ export default function App() {
     const failed = [];
     for (const r of recipients) {
       const message = buildIndividualMessage(r.nome, totalValue, perPersonValue, settings.pixKey);
-      const url = `${CALLMEBOT_URL}?phone=${encodeURIComponent(r.telefone.trim())}&text=${encodeURIComponent(message)}&apikey=${encodeURIComponent(r.apikey.trim())}`;
-      try {
-        // O CallMeBot não envia cabeçalhos CORS, então usamos "no-cors":
-        // a mensagem é entregue normalmente, mas a resposta não pode ser lida.
-        await fetch(url, { mode: 'no-cors' });
-      } catch {
-        failed.push(r.nome);
-      }
+      const status = await sendCallMeBotMessage(r, message);
+      if (status === 'erro') failed.push(r.nome);
       // Pequena pausa entre envios para não sobrecarregar o CallMeBot.
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
@@ -279,6 +304,17 @@ export default function App() {
 
   const canClose = !invoice.closed && expenses.length > 0 && residents.length > 0;
 
+  if (view === 'historico') {
+    return (
+      <HistoricoView
+        residents={residents}
+        messages={messages}
+        onSendMessage={sendAdHocMessage}
+        onBack={() => setView('dashboard')}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 pb-10">
       <header className="sticky top-0 z-10 bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between shadow-sm">
@@ -291,13 +327,22 @@ export default function App() {
             <p className="text-xs text-slate-400">{getCurrentMonthLabel()}</p>
           </div>
         </div>
-        <button
-          onClick={() => setShowSettings(true)}
-          className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors"
-          aria-label="Configurações"
-        >
-          <Settings size={22} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setView('historico')}
+            className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors"
+            aria-label="Histórico de cobranças"
+          >
+            <History size={22} />
+          </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 transition-colors"
+            aria-label="Configurações"
+          >
+            <Settings size={22} />
+          </button>
+        </div>
       </header>
 
       <main className="max-w-2xl mx-auto px-4 py-4 space-y-4">
